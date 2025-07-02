@@ -1,16 +1,59 @@
-import mongoose from "mongoose";
+import { Webhook } from "svix";
+import connectDB from "@/config/db";
+import User from "@/models/User";
+import { headers } from "next/headers";
 
-const UserSchema = new mongoose.Schema(
-    {
-        _id: {type: String, required: true},
-         name: {type: String, required: true},
-          email: {type: String, required: true},
-           _image: {type: String, required: false}
-    },
+export async function POST(req) {
+  try {
+    const wh = new Webhook(process.env.SIGNING_SECRET);
 
-    {timestamps: true}
-);
+    const headerPayload = headers(); // ✅ no 'await'
+    const svixHeaders = {
+      "svix-id": headerPayload.get("svix-id"),
+      "svix-timestamp": headerPayload.get("svix-timestamp"),
+      "svix-signature": headerPayload.get("svix-signature"),
+    };
 
-const User = mongoose.models.User || mongoose.model("User", UserSchema)
+    const payload = await req.json();
+    const body = JSON.stringify(payload);
 
-export default User;
+    const { data, type } = wh.verify(body, svixHeaders);
+
+    // ✅ Format user data from Clerk webhook
+    const userData = {
+      _id: data.id,
+      email: data.email_addresses[0].email_address,
+      name: `${data.first_name} ${data.last_name}`,
+      image: data.image_url,
+    };
+
+    await connectDB();
+
+    // ✅ Handle different event types
+    switch (type) {
+      case "user.created":
+        console.log("Creating user:", userData);
+        await User.create(userData);
+        break;
+
+      case "user.updated":
+        console.log("Updating user:", userData);
+        await User.findByIdAndUpdate(data.id, userData);
+        break;
+
+      case "user.deleted":
+        console.log("Deleting user:", data.id);
+        await User.findByIdAndDelete(data.id);
+        break;
+
+      default:
+        console.log("Unhandled event type:", type);
+        break;
+    }
+
+    return new Response(JSON.stringify({ message: "Event received" }), { status: 200 });
+  } catch (err) {
+    console.error("Webhook Error:", err);
+    return new Response(JSON.stringify({ error: "Webhook processing failed" }), { status: 500 });
+  }
+}
